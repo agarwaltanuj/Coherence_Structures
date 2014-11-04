@@ -1,0 +1,3 @@
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/mem-system.c mem-system/mem-system.c
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/mod-stack.h mem-system/mod-stack.h
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/nmoesi-protocol.c mem-system/nmoesi-protocol.c

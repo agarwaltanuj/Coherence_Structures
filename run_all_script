@@ -1,0 +1,12 @@
+cd /home/agarwaltanuj/Multisim_eviction_schemes/EV_M_first
+./uninstall_multi2sim
+./install_multi2sim
+cd /home/agarwaltanuj/Multisim_eviction_schemes/EV_M_first/samples/x86
+./sample_regress
+./fft_regress
+cd /home/agarwaltanuj/Multisim_eviction_schemes/MS_Directory_based
+./uninstall_multi2sim
+./install_multi2sim
+cd /home/agarwaltanuj/Multisim_eviction_schemes/MS_Directory_based/samples/x86
+./sample_regress
+./fft_regress

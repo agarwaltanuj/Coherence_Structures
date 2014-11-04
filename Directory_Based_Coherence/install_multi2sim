@@ -1,0 +1,4 @@
+./configure
+make 
+make check
+echo tanuj121 | sudo -S make install

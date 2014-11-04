@@ -1,0 +1,594 @@
+/*
+ *  Copyright (C) 2012  Rafael Ubal (ubal@ece.neu.edu)
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+#include <assert.h>
+
+#include <lib/esim/esim.h>
+#include <lib/esim/trace.h>
+#include <lib/mhandle/mhandle.h>
+#include <lib/util/misc.h>
+#include <lib/util/string.h>
+#include <lib/util/debug.h>
+
+#include "cache.h"
+#include "mem-system.h"
+#include "prefetcher.h"
+#include "mod-stack.h"
+
+
+/*
+ * Public Variables
+ */
+
+struct str_map_t cache_policy_map =
+{
+	12, {
+		{ "LRU", cache_policy_lru },
+		{ "FIFO", cache_policy_fifo },
+		{ "Random", cache_policy_random },
+		{ "LRU_MF", cache_policy_lru_modified_first },
+		{ "LRU_SF", cache_policy_lru_shared_first },
+		{ "LRU_EF", cache_policy_lru_exclusive_first },
+		{ "Random_MF", cache_policy_random_modified_first },
+		{ "Random_SF", cache_policy_random_shared_first },
+		{ "Random_EF", cache_policy_random_exclusive_first },
+		{ "FIFO_MF", cache_policy_fifo_modified_first },
+		{ "FIFO_SF", cache_policy_fifo_shared_first },
+		{ "FIFO_EF", cache_policy_fifo_exclusive_first }
+	}
+};
+
+struct str_map_t cache_block_state_map =
+{
+	6, {
+		{ "I", cache_block_invalid },
+		{ "N", cache_block_noncoherent },
+		{ "M", cache_block_modified },
+		{ "O", cache_block_owned },
+		{ "E", cache_block_exclusive },
+		{ "S", cache_block_shared }
+	}
+};
+
+
+
+
+/*
+ * Private Functions
+ */
+
+enum cache_waylist_enum
+{
+	cache_waylist_head,
+	cache_waylist_tail
+};
+
+static void cache_update_waylist(struct cache_set_t *set,
+	struct cache_block_t *blk, enum cache_waylist_enum where)
+{
+	if (!blk->way_prev && !blk->way_next)
+	{
+		assert(set->way_head == blk && set->way_tail == blk);
+		return;
+		
+	}
+	else if (!blk->way_prev)
+	{
+		assert(set->way_head == blk && set->way_tail != blk);
+		if (where == cache_waylist_head)
+			return;
+		set->way_head = blk->way_next;
+		blk->way_next->way_prev = NULL;
+		
+	}
+	else if (!blk->way_next)
+	{
+		assert(set->way_head != blk && set->way_tail == blk);
+		if (where == cache_waylist_tail)
+			return;
+		set->way_tail = blk->way_prev;
+		blk->way_prev->way_next = NULL;
+		
+	}
+	else
+	{
+		assert(set->way_head != blk && set->way_tail != blk);
+		blk->way_prev->way_next = blk->way_next;
+		blk->way_next->way_prev = blk->way_prev;
+	}
+
+	if (where == cache_waylist_head)
+	{
+		blk->way_next = set->way_head;
+		blk->way_prev = NULL;
+		set->way_head->way_prev = blk;
+		set->way_head = blk;
+	}
+	else
+	{
+		blk->way_prev = set->way_tail;
+		blk->way_next = NULL;
+		set->way_tail->way_next = blk;
+		set->way_tail = blk;
+	}
+}
+
+
+
+
+
+/*
+ * Public Functions
+ */
+
+
+struct cache_t *cache_create(char *name, unsigned int num_sets, unsigned int block_size,
+	unsigned int assoc, enum cache_policy_t policy)
+{
+	struct cache_t *cache;
+	struct cache_block_t *block;
+	unsigned int set, way;
+
+	/* Initialize */
+	cache = xcalloc(1, sizeof(struct cache_t));
+	cache->name = xstrdup(name);
+	cache->num_sets = num_sets;
+	cache->block_size = block_size;
+	cache->assoc = assoc;
+	cache->policy = policy;
+
+	/* Derived fields */
+	assert(!(num_sets & (num_sets - 1)));
+	assert(!(block_size & (block_size - 1)));
+	assert(!(assoc & (assoc - 1)));
+	cache->log_block_size = log_base2(block_size);
+	cache->block_mask = block_size - 1;
+	
+	/* Initialize array of sets */
+	cache->sets = xcalloc(num_sets, sizeof(struct cache_set_t));
+	for (set = 0; set < num_sets; set++)
+	{
+		/* Initialize array of blocks */
+		cache->sets[set].blocks = xcalloc(assoc, sizeof(struct cache_block_t));
+		cache->sets[set].way_head = &cache->sets[set].blocks[0];
+		cache->sets[set].way_tail = &cache->sets[set].blocks[assoc - 1];
+		for (way = 0; way < assoc; way++)
+		{
+			block = &cache->sets[set].blocks[way];
+			block->way = way;
+			block->way_prev = way ? &cache->sets[set].blocks[way - 1] : NULL;
+			block->way_next = way < assoc - 1 ? &cache->sets[set].blocks[way + 1] : NULL;
+		}
+	}
+
+	cache->cache_lock = xcalloc(cache->num_sets * cache->assoc, sizeof(struct cache_lock_t));
+	
+	/* Return it */
+	return cache;
+}
+
+
+void cache_free(struct cache_t *cache)
+{
+	unsigned int set;
+
+	for (set = 0; set < cache->num_sets; set++)
+		free(cache->sets[set].blocks);
+	free(cache->sets);
+	free(cache->name);
+	if (cache->prefetcher)
+		prefetcher_free(cache->prefetcher);
+
+	free(cache->cache_lock);
+	free(cache);
+}
+
+
+/* Return {set, tag, offset} for a given address */
+void cache_decode_address(struct cache_t *cache, unsigned int addr, int *set_ptr, int *tag_ptr, 
+	unsigned int *offset_ptr)
+{
+	PTR_ASSIGN(set_ptr, (addr >> cache->log_block_size) % cache->num_sets);
+	PTR_ASSIGN(tag_ptr, addr & ~cache->block_mask);
+	PTR_ASSIGN(offset_ptr, addr & cache->block_mask);
+}
+
+
+/* Look for a block in the cache. If it is found and its state is other than 0,
+ * the function returns 1 and the state and way of the block are also returned.
+ * The set where the address would belong is returned anyways. */
+int cache_find_block(struct cache_t *cache, unsigned int addr, int *set_ptr, int *way_ptr, 
+	int *state_ptr)
+{
+	int set, tag, way;
+
+	/* Locate block */
+	tag = addr & ~cache->block_mask;
+	set = (addr >> cache->log_block_size) % cache->num_sets;
+	PTR_ASSIGN(set_ptr, set);
+	PTR_ASSIGN(state_ptr, 0);  /* Invalid */
+	for (way = 0; way < cache->assoc; way++)
+		if (cache->sets[set].blocks[way].tag == tag && cache->sets[set].blocks[way].state)
+			break;
+	
+	/* Block not found */
+	if (way == cache->assoc)
+		return 0;
+	
+	/* Block found */
+	PTR_ASSIGN(way_ptr, way);
+	PTR_ASSIGN(state_ptr, cache->sets[set].blocks[way].state);
+	return 1;
+}
+
+
+/* Set the tag and state of a block.
+ * If replacement policy is FIFO, update linked list in case a new
+ * block is brought to cache, i.e., a new tag is set. */
+void cache_set_block(struct cache_t *cache, int set, int way, int tag, int state)
+{
+	assert(set >= 0 && set < cache->num_sets);
+	assert(way >= 0 && way < cache->assoc);
+
+	mem_trace("mem.set_block cache=\"%s\" set=%d way=%d tag=0x%x state=\"%s\"\n",
+			cache->name, set, way, tag,
+			str_map_value(&cache_block_state_map, state));
+
+	if (((cache->policy == cache_policy_fifo) || (cache->policy == cache_policy_fifo_modified_first) || (cache->policy == cache_policy_fifo_exclusive_first) || (cache->policy == cache_policy_fifo_shared_first))
+		&& cache->sets[set].blocks[way].tag != tag)
+		cache_update_waylist(&cache->sets[set],
+			&cache->sets[set].blocks[way],
+			cache_waylist_head);
+	cache->sets[set].blocks[way].tag = tag;
+	cache->sets[set].blocks[way].state = state;
+}
+
+
+void cache_get_block(struct cache_t *cache, int set, int way, int *tag_ptr, int *state_ptr)
+{
+	assert(set >= 0 && set < cache->num_sets);
+	assert(way >= 0 && way < cache->assoc);
+	PTR_ASSIGN(tag_ptr, cache->sets[set].blocks[way].tag);
+	PTR_ASSIGN(state_ptr, cache->sets[set].blocks[way].state);
+}
+
+
+/* Update LRU counters, i.e., rearrange linked list in case
+ * replacement policy is LRU. */
+void cache_access_block(struct cache_t *cache, int set, int way)
+{
+	int move_to_head;
+	
+	assert(set >= 0 && set < cache->num_sets);
+	assert(way >= 0 && way < cache->assoc);
+
+	/* A block is moved to the head of the list for LRU policy.
+	 * It will also be moved if it is its first access for FIFO policy, i.e., if the
+	 * state of the block was invalid. */
+	move_to_head = (cache->policy == cache_policy_lru) || (cache->policy == cache_policy_lru_shared_first) || (cache->policy == cache_policy_lru_exclusive_first) || (cache->policy == cache_policy_lru_modified_first) ||
+		(((cache->policy == cache_policy_fifo) || (cache->policy == cache_policy_fifo_modified_first) || (cache->policy == cache_policy_fifo_exclusive_first) || (cache->policy == cache_policy_fifo_shared_first)) && !cache->sets[set].blocks[way].state);
+	if (move_to_head && cache->sets[set].blocks[way].way_prev)
+		cache_update_waylist(&cache->sets[set],
+			&cache->sets[set].blocks[way],
+			cache_waylist_head);
+}
+
+
+/* Return the way of the block to be replaced in a specific set,
+ * depending on the replacement policy */
+int cache_replace_block(struct cache_t *cache, int set)
+{
+	//struct cache_block_t *block;
+	int way_1;
+
+	/* Try to find an invalid block. Do this in the LRU order, to avoid picking the
+	 * MRU while its state has not changed to valid yet. */
+	assert(set >= 0 && set < cache->num_sets);
+	/*
+	for (block = cache->sets[set].way_tail; block; block = block->way_prev)
+		if (!block->state)
+			return block->way;
+	*/
+
+	/* LRU and FIFO replacement: return block at the
+	 * tail of the linked list */
+	if ((cache->policy == cache_policy_lru) || (cache->policy == cache_policy_lru_shared_first) || (cache->policy == cache_policy_lru_modified_first) || (cache->policy == cache_policy_lru_exclusive_first))
+	{
+		int cache_state;
+		struct cache_block_t *blk;
+
+		int way = cache->sets[set].way_tail->way;
+
+		if(cache->policy == cache_policy_lru)
+		{
+			cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+				cache_waylist_head);
+			return way;
+		}
+
+		cache_get_block(cache, set, way, NULL, &cache_state);
+
+		if(((cache->policy == cache_policy_lru_shared_first) && (cache_state == cache_block_shared)) || ((cache->policy == cache_policy_lru_exclusive_first) && (cache_state == cache_block_exclusive)) || ((cache->policy == cache_policy_lru_modified_first) && (cache_state == cache_block_modified)))
+		{
+			cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+				cache_waylist_head);
+			return way;
+		}
+		
+		blk = cache->sets[set].way_head;
+
+		while(blk)
+		{
+			way = blk->way;
+			
+			cache_get_block(cache, set, way, NULL, &cache_state);
+
+			if((cache->policy == cache_policy_lru_modified_first) && (cache_state == cache_block_modified))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+
+			if((cache->policy == cache_policy_lru_shared_first) && (cache_state == cache_block_shared))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+
+			if((cache->policy == cache_policy_lru_exclusive_first) && (cache_state == cache_block_exclusive))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+			
+			blk = blk->way_next;
+		}
+
+		way = cache->sets[set].way_tail->way;
+		cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+			cache_waylist_head);
+		return way;
+	}
+	
+	/* Random replacement */
+	// assert(cache->policy == cache_policy_random);
+	if(cache->policy == cache_policy_random)
+	{
+		return random() % cache->assoc;
+	}
+	
+	if((cache->policy == cache_policy_fifo) || (cache->policy == cache_policy_fifo_exclusive_first) || (cache->policy == cache_policy_fifo_shared_first) || (cache->policy == cache_policy_fifo_modified_first))
+	{
+		int cache_state;
+		struct cache_block_t *blk;
+
+		int way = cache->sets[set].way_tail->way;
+		
+		if(cache->policy == cache_policy_fifo)
+		{
+			cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+				cache_waylist_head);
+			return way;
+		}
+
+		cache_get_block(cache, set, way, NULL, &cache_state);
+
+		if(((cache->policy == cache_policy_fifo_shared_first) && (cache_state == cache_block_shared)) || ((cache->policy == cache_policy_fifo_exclusive_first) && (cache_state == cache_block_exclusive)) || ((cache->policy == cache_policy_fifo_modified_first) && (cache_state == cache_block_modified)))
+		{
+			cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+				cache_waylist_head);
+			return way;
+		}
+		
+		blk = cache->sets[set].way_tail;
+
+		while(blk)
+		{
+			way = blk->way;
+			
+			cache_get_block(cache, set, way, NULL, &cache_state);
+
+			if((cache->policy == cache_policy_fifo_modified_first) && (cache_state == cache_block_modified))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+
+			if((cache->policy == cache_policy_fifo_shared_first) && (cache_state == cache_block_shared))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+
+			if((cache->policy == cache_policy_fifo_exclusive_first) && (cache_state == cache_block_exclusive))
+			{
+				cache_update_waylist(&cache->sets[set], blk, cache_waylist_head);
+				return way;
+			}
+			
+			blk = blk->way_prev;
+		}
+
+		way = cache->sets[set].way_tail->way;
+		cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+			cache_waylist_head);
+		return way;
+	}
+	
+	// try to find out the way's as we try the new policies.
+	for(int way = cache->assoc - 1; way >=0; way--)
+	{
+		int cache_state;
+
+		cache_get_block(cache, set, way, NULL, &cache_state);
+
+		if(((cache->policy == cache_policy_fifo_modified_first) || (cache->policy == cache_policy_random_modified_first)) && (cache_state == cache_block_modified))
+		{
+			return way;
+		}
+		if(((cache->policy == cache_policy_fifo_shared_first) || (cache->policy == cache_policy_random_shared_first)) && (cache_state == cache_block_shared))
+		{
+			return way;
+		}
+		if(((cache->policy == cache_policy_fifo_exclusive_first) || (cache->policy == cache_policy_random_exclusive_first)) && (cache_state == cache_block_exclusive))
+		{
+			return way;
+		}
+	}
+	
+	// No way found, return RANDOM policy
+	if((cache->policy == cache_policy_random_modified_first) || (cache->policy == cache_policy_random_exclusive_first) || (cache->policy == cache_policy_random_shared_first))
+	{
+		return random() % cache->assoc;
+	}
+
+	// No way found, return RANDOM policy
+	//if((cache->policy == cache_policy_fifo_modified_first) || (cache->policy == cache_policy_fifo_exclusive_first) || (cache->policy == cache_policy_fifo_shared_first))
+	//{
+	//	way_1 = cache->sets[set].way_tail->way;
+	//	cache_update_waylist(&cache->sets[set], cache->sets[set].way_tail, 
+	//		cache_waylist_head);
+
+	//	return way_1;
+	//}
+// 	return random() % cache->assoc;
+}
+
+
+void cache_set_transient_tag(struct cache_t *cache, int set, int way, int tag)
+{
+	struct cache_block_t *block;
+
+	/* Set transient tag */
+	block = &cache->sets[set].blocks[way];
+	block->transient_tag = tag;
+}
+
+struct cache_lock_t *cache_lock_get(struct cache_t *cache, int set, int way)
+{
+	struct cache_lock_t *cache_lock;
+	assert(set < cache->num_sets && way < cache->assoc);
+	cache_lock = &cache->cache_lock[set * cache->assoc + way];
+//	mem_debug("  %lld cache_lock retrieve\n", esim_cycle());
+	return cache_lock;
+}
+
+
+int cache_entry_lock(struct cache_t *cache, int set, int way, int event, struct mod_stack_t *stack)
+{
+	struct cache_lock_t *cache_lock;
+	struct mod_stack_t *lock_queue_iter;
+
+	/* Get lock */
+	assert(set < cache->num_sets && way < cache->assoc);
+	cache_lock = &cache->cache_lock[set * cache->assoc + way];
+
+	/* If the entry is already locked, enqueue a new waiter and
+	 * return failure to lock. */
+	if (cache_lock->lock)
+	{
+		/* Enqueue the stack to the end of the lock queue */
+		stack->cache_lock_next = NULL;
+		stack->cache_lock_event = event;
+		stack->ret_stack->way = stack->way;
+
+		if (!cache_lock->lock_queue)
+		{
+			/* Special case: queue is empty */
+			cache_lock->lock_queue = stack;
+		}
+		else 
+		{
+			lock_queue_iter = cache_lock->lock_queue;
+
+			/* ------------------------------------------------------------------------ */
+			/* FIXME - Replaced with code below, just inserting at the end of the queue.
+			 * But this seems to be what this function was doing before, isn't it? Why
+			 * weren't we happy with this policy? */
+			while (lock_queue_iter->cache_lock_next)
+				lock_queue_iter = lock_queue_iter->cache_lock_next;
+			/* ------------------------------------------------------------------------ */
+
+			if (!lock_queue_iter->cache_lock_next) 
+			{
+				/* Stack goes at end of queue */
+				lock_queue_iter->cache_lock_next = stack;
+			}
+			else 
+			{
+				/* Stack goes in front or middle of queue */
+				stack->cache_lock_next = lock_queue_iter->cache_lock_next;
+				lock_queue_iter->cache_lock_next = stack;
+			}
+		}
+		mem_debug("    0x%x access suspended\n", stack->tag);
+		return 0;
+	}
+
+	/* Trace */
+	mem_trace("mem.new_access_block cache=\"%s\" access=\"A-%lld\" set=%d way=%d\n",
+		cache->name, stack->id, set, way);
+
+	/* Lock entry */
+	cache_lock->lock = 1;
+	cache_lock->stack_id = stack->id;
+	return 1;
+}
+
+
+void cache_entry_unlock(struct cache_t *cache, int set, int way)
+{
+	struct cache_lock_t *cache_lock;
+	struct mod_stack_t *stack;
+	FILE *f;
+
+	/* Get lock */
+	assert(set < cache->num_sets && way < cache->assoc);
+	cache_lock = &cache->cache_lock[set * cache->assoc + way];
+
+	/* Wake up first waiter */
+	if (cache_lock->lock_queue)
+	{
+		/* Debug */
+		f = debug_file(mem_debug_category);
+		if (f)
+		{
+			mem_debug("    A-%lld resumed", cache_lock->lock_queue->id);
+			if (cache_lock->lock_queue->cache_lock_next)
+			{
+				mem_debug(" - {");
+				for (stack = cache_lock->lock_queue->cache_lock_next; stack;
+						stack = stack->cache_lock_next)
+					mem_debug(" A-%lld", stack->id);
+				mem_debug(" } still waiting");
+			}
+			mem_debug("\n");
+		}
+
+		/* Wake up access */
+		esim_schedule_event(cache_lock->lock_queue->cache_lock_event, cache_lock->lock_queue, 1);
+		cache_lock->lock_queue = cache_lock->lock_queue->cache_lock_next;
+	}
+
+	/* Trace */
+	mem_trace("mem.end_access_block cache=\"%s\" access=\"A-%lld\" set=%d way=%d\n",
+		cache->name, cache_lock->stack_id, set, way);
+
+	/* Unlock entry */
+	cache_lock->lock = 0;
+}

@@ -1,0 +1,37 @@
+diff -f /home/agarwaltanuj/Multisim_snoop_versions/src/a /home/agarwaltanuj/Multisim_versions/multisim5state/src/a
+a0
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/mem-system.c mem-system/mem-system.c
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/mod-stack.h mem-system/mod-stack.h
+diff -r /home/agarwaltanuj/Multisim_versions/multisim_3state/src/mem-system/nmoesi-protocol.c mem-system/nmoesi-protocol.c
+.
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/arch and /home/agarwaltanuj/Multisim_versions/multisim5state/src/arch
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/.deps and /home/agarwaltanuj/Multisim_versions/multisim5state/src/.deps
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/dram and /home/agarwaltanuj/Multisim_versions/multisim5state/src/dram
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/driver and /home/agarwaltanuj/Multisim_versions/multisim5state/src/driver
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/lib and /home/agarwaltanuj/Multisim_versions/multisim5state/src/lib
+Only in /home/agarwaltanuj/Multisim_snoop_versions/src/: .m2s.c.swp
+diff -f /home/agarwaltanuj/Multisim_snoop_versions/src/Makefile /home/agarwaltanuj/Multisim_versions/multisim5state/src/Makefile
+c170
+ACLOCAL = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/missing --run aclocal-1.11
+.
+c174 176
+AUTOCONF = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/missing --run autoconf
+AUTOHEADER = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/missing --run autoheader
+AUTOMAKE = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/missing --run automake-1.11
+.
+c227
+MAKEINFO = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/missing --run makeinfo
+.
+c255 258
+abs_builddir = /home/agarwaltanuj/Multisim_versions/multisim5state/src
+abs_srcdir = /home/agarwaltanuj/Multisim_versions/multisim5state/src
+abs_top_builddir = /home/agarwaltanuj/Multisim_versions/multisim5state
+abs_top_srcdir = /home/agarwaltanuj/Multisim_versions/multisim5state
+.
+c288
+install_sh = ${SHELL} /home/agarwaltanuj/Multisim_versions/multisim5state/install-sh
+.
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/mem-system and /home/agarwaltanuj/Multisim_versions/multisim5state/src/mem-system
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/network and /home/agarwaltanuj/Multisim_versions/multisim5state/src/network
+Only in /home/agarwaltanuj/Multisim_snoop_versions/src/: snoop_protocol_tree
+Common subdirectories: /home/agarwaltanuj/Multisim_snoop_versions/src/visual and /home/agarwaltanuj/Multisim_versions/multisim5state/src/visual
